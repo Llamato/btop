@@ -1234,17 +1234,20 @@ namespace Cpu {
 
 		//Get cpu capacity
 		try {
-			Shared::coreCapacities.assign(Shared::coreCount, 1024L);
+			Shared::coreCapacities.assign(Shared::coreCount, 0L);
 			for(long current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
 				std::stringstream to;
 				to << current_cpu;
 				std::string current_cpu_index = to.str();
 				std::string current_cpu_capacity;
 				cread.open("/sys/devices/system/cpu/cpu" + current_cpu_index + "/cpu_capacity");
-				cread >> current_cpu_capacity;
+				if (not (cread >> current_cpu_capacity)) {
+					cread.close();
+					continue;
+				}
 				cread.close();
-				if(current_cpu_capacity.empty()) continue;
 				current_cpu_capacity.erase(std::remove(current_cpu_capacity.begin(), current_cpu_capacity.end(), '\n'), current_cpu_capacity.end());
+				if (current_cpu_capacity.empty()) continue;
 				Shared::coreCapacities[current_cpu] = std::stol(current_cpu_capacity);
 			}
 		} catch (const std::exception& e) {
