@@ -1234,7 +1234,7 @@ namespace Cpu {
 
 		//Get cpu capacity
 		try {
-			Shared::coreCapacities.clear();
+			Shared::coreCapacities.assign(Shared::coreCount, 1024L);
 			for(long current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
 				std::stringstream to;
 				to << current_cpu;
@@ -1243,18 +1243,10 @@ namespace Cpu {
 				cread.open("/sys/devices/system/cpu/cpu" + current_cpu_index + "/cpu_capacity");
 				cread >> current_cpu_capacity;
 				cread.close();
-				if(current_cpu_capacity.length() <= 0) continue;
+				if(current_cpu_capacity.empty()) continue;
 				current_cpu_capacity.erase(std::remove(current_cpu_capacity.begin(), current_cpu_capacity.end(), '\n'), current_cpu_capacity.end());
-				Shared::coreCapacities.push_back(std::stol(current_cpu_capacity));
+				Shared::coreCapacities[current_cpu] = std::stol(current_cpu_capacity);
 			}
-
-			//Debug!!!
-			//Note reports 0 for cpuCore = coreCount -1
-			/*std::ofstream kprintdev("/dev/kmsg", std::ios::out | std::ios::app);
-			for(long current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
-				kprintdev << current_cpu << " " << Shared::coreCapacities[current_cpu] << std::endl;
-			}
-			kprintdev.close();*/
 		} catch (const std::exception& e) {
 			Logger::debug("Cpu::collect : {}", e.what());
 			if (cread.bad()) throw std::runtime_error("Failed to read /sys/devices/system/cpu/cpu*/cpu_capacity");
