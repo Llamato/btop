@@ -32,6 +32,10 @@ namespace fs = std::filesystem;
 namespace rng = std::ranges;
 using namespace Tools;
 
+namespace Shared {
+	std::vector<long> coreCapacities;
+}
+
 namespace Cpu {
     std::optional<std::string> container_engine;
 

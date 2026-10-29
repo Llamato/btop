@@ -1186,7 +1186,7 @@ namespace Cpu {
 
 						//? Populate cpu.cpu_percent with all fields from stat
 						for (int ii = 0; const auto& val : times) {
-							cpu.cpu_percent.atsys(time_names.at(ii)).push_back(clamp((long long)round((double)(val - cpu_old.at(time_names.at(ii))) * 100 / calc_totals), 0ll, 100ll));
+							cpu.cpu_percent.at(time_names.at(ii)).push_back(clamp((long long)round((double)(val - cpu_old.at(time_names.at(ii))) * 100 / calc_totals), 0ll, 100ll));
 							cpu_old.at(time_names.at(ii)) = val;
 
 							//? Reduce size if there are more values than needed for graph
@@ -1234,17 +1234,29 @@ namespace Cpu {
 
 		//Get cpu capacity
 		try {
-			for(size_t current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
+			Shared::coreCapacities.clear();
+			for(long current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
 				std::stringstream to;
-				to << current_cpu
+				to << current_cpu;
 				std::string current_cpu_index = to.str();
 				std::string current_cpu_capacity;
 				cread.open("/sys/devices/system/cpu/cpu" + current_cpu_index + "/cpu_capacity");
 				cread >> current_cpu_capacity;
-				
+				cread.close();
+				if(current_cpu_capacity.length() <= 0) continue;
+				current_cpu_capacity.erase(std::remove(current_cpu_capacity.begin(), current_cpu_capacity.end(), '\n'), current_cpu_capacity.end());
+				Shared::coreCapacities.push_back(std::stol(current_cpu_capacity));
 			}
+
+			//Debug!!!
+			//Note reports 0 for cpuCore = coreCount -1
+			std::ofstream kprintdev("/dev/kmsg", std::ios::out | std::ios::app);
+			for(long current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
+				kprintdev << current_cpu << " " << Shared::coreCapacities[current_cpu] << std::endl;
+			}
+			kprintdev.close();
 		} catch (const std::exception& e) {
-			Logger.debug("Cpu::collect : {}", e.what());
+			Logger::debug("Cpu::collect : {}", e.what());
 			if (cread.bad()) throw std::runtime_error("Failed to read /sys/devices/system/cpu/cpu*/cpu_capacity");
 			else throw std::runtime_error(fmt::format("Cpu::collect() : {}", e.what()));
 		}

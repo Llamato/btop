@@ -97,6 +97,7 @@ namespace Shared {
 	void init();
 
 	extern long coreCount, page_size, clk_tck;
+	extern std::vector<long> coreCapacities;
 
 #if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 	struct KvmDeleter {
