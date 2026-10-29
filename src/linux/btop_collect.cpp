@@ -1250,11 +1250,11 @@ namespace Cpu {
 
 			//Debug!!!
 			//Note reports 0 for cpuCore = coreCount -1
-			std::ofstream kprintdev("/dev/kmsg", std::ios::out | std::ios::app);
+			/*std::ofstream kprintdev("/dev/kmsg", std::ios::out | std::ios::app);
 			for(long current_cpu = 0; current_cpu < Shared::coreCount; current_cpu++) {
 				kprintdev << current_cpu << " " << Shared::coreCapacities[current_cpu] << std::endl;
 			}
-			kprintdev.close();
+			kprintdev.close();*/
 		} catch (const std::exception& e) {
 			Logger::debug("Cpu::collect : {}", e.what());
 			if (cread.bad()) throw std::runtime_error("Failed to read /sys/devices/system/cpu/cpu*/cpu_capacity");

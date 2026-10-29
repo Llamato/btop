@@ -911,16 +911,23 @@ namespace Cpu {
 		//? Core text and graphs
 		int cx = 0, cy = 1, cc = 0, core_width = (b_column_size == 0 ? 2 : 3);
 		if (Shared::coreCount >= 100) core_width++;
-		const auto core_cap_min = Shared::coreCapacities.empty() ? 0L : *std::min_element(Shared::coreCapacities.begin(), Shared::coreCapacities.end());
-		const auto core_cap_max = Shared::coreCapacities.empty() ? 0L : *std::max_element(Shared::coreCapacities.begin(), Shared::coreCapacities.end());
-		const bool all_core_capacities_equal = !Shared::coreCapacities.empty() && core_cap_min == core_cap_max;
+		long maxCoreCapacity = 0;
+		long minCoreCapacity = 0;
+		std::ofstream kprintdev("/dev/kmsg", std::ios::out | std::ios::app);
+		if(!Shared::coreCapacities.empty()) {
+			maxCoreCapacity = *std::max_element(std::begin(Shared::coreCapacities), std::end(Shared::coreCapacities));
+			kprintdev << "max: " << maxCoreCapacity << std::endl;
+		 	minCoreCapacity = *std::min_element(std::begin(Shared::coreCapacities), std::end(Shared::coreCapacities));
+			kprintdev  << "min: " << minCoreCapacity << std::endl;
+		}
+		kprintdev.close();
 		for (const auto& n : iota(0, Shared::coreCount)) {
 			auto enabled = is_cpu_enabled(n);
-			const auto core_capacity = (n >= 0 && n < (int)Shared::coreCapacities.size()) ? Shared::coreCapacities.at(n) : 0L;
-			const string core_capacity_label = Shared::coreCount < 100
-				? (all_core_capacities_equal ? "C" : (core_capacity == core_cap_max ? "PC" : "EC"))
-				: "";
-			out += Mv::to(b_y + cy + 1, b_x + cx + 1) + Theme::c(enabled ? "main_fg" : "inactive_fg") + (Shared::coreCount < 100 ? Fx::b + core_capacity_label + Fx::ub : "") + ljust(to_string(n), core_width);
+			std::string core_label = "C";
+			if(maxCoreCapacity != minCoreCapacity) {
+				core_label = Shared::coreCapacities[n] == maxCoreCapacity ? "PC" : "EC";
+			} 
+			out += Mv::to(b_y + cy + 1, b_x + cx + 1) + Theme::c(enabled ? "main_fg" : "inactive_fg") + (Shared::coreCount < 100 ? Fx::b + core_label + Fx::ub : "") + ljust(to_string(n), core_width);
 			if ((b_column_size > 0 or extra_width > 0) and cmp_less(n, core_graphs.size()))
 				out += Theme::c("inactive_fg") + graph_bg * (5 * b_column_size + extra_width) + Mv::l(5 * b_column_size + extra_width)
 					+ core_graphs.at(n)(safeVal(cpu.core_percent, n), data_same or redraw);
