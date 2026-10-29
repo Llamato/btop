@@ -924,9 +924,7 @@ namespace Cpu {
 		for (const auto& n : iota(0, Shared::coreCount)) {
 			auto enabled = is_cpu_enabled(n);
 			std::string core_label = "C";
-			if(maxCoreCapacity != minCoreCapacity) {
-				core_label = Shared::coreCapacities[n] == maxCoreCapacity ? "PC" : "EC";
-			} 
+			core_label = Shared::coreCapacities[n] == maxCoreCapacity ? "PC" : "EC";
 			out += Mv::to(b_y + cy + 1, b_x + cx + 1) + Theme::c(enabled ? "main_fg" : "inactive_fg") + (Shared::coreCount < 100 ? Fx::b + core_label + Fx::ub : "") + ljust(to_string(n), core_width);
 			if ((b_column_size > 0 or extra_width > 0) and cmp_less(n, core_graphs.size()))
 				out += Theme::c("inactive_fg") + graph_bg * (5 * b_column_size + extra_width) + Mv::l(5 * b_column_size + extra_width)
