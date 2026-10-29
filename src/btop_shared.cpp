@@ -38,6 +38,7 @@ namespace Shared {
 
 namespace Cpu {
     std::optional<std::string> container_engine;
+	vector<CoreType> core_types;
 
 	string trim_name(string name) {
 		auto name_vec = ssplit(name);
