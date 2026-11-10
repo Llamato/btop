@@ -492,6 +492,18 @@ namespace Cpu {
         }
     }
 
+	if (name.empty() and fs::exists("/sys/firmware/devicetree/base/compatible")) {
+        const string compatible = readfile("/sys/firmware/devicetree/base/compatible", "");
+        static const std::regex apple_cpu_regex(R"(apple,t([0-9]+))");
+        std::smatch match;
+        if (std::regex_search(compatible, match, apple_cpu_regex)) {
+            const auto cpu_id = static_cast<unsigned int>(std::stoul(match[1].str()));
+            Logger::debug("Matched Apple CPU ID: {}", cpu_id);
+            name = apple_cpu_id_to_name(cpu_id);
+            Logger::debug("Resolved Apple CPU name: '{}'", name);
+        }
+    }
+
     if (name.empty() and fs::exists("/sys/devices")) {
         for (const auto& d : fs::directory_iterator("/sys/devices")) {
             if (string(d.path().filename()).starts_with("arm")) {
