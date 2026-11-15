@@ -99,6 +99,11 @@ ifeq ($(PLATFORM_LC)$(ARCH),linuxx86_64)
 		INTEL_GPU_SUPPORT := true
 	endif
 endif
+#? Asahi Linux (Apple AGX iGPU) collection uses no vendor libraries, so it is enabled for
+#? static builds as well.
+ifeq ($(PLATFORM_LC)$(ARCH),linuxaarch64)
+	GPU_SUPPORT := true
+endif
 ifeq ($(PLATFORM_LC)$(ARCH),macosarm64)
 	GPU_SUPPORT := true
 endif
