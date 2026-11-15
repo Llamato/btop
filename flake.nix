@@ -2,7 +2,10 @@
   description = "A very basic flake";
 
   inputs = {
-    nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst";
+    nixpkgs = {
+      url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst";
+      flake = false;
+    };
   };
 
   outputs = inputs: {
