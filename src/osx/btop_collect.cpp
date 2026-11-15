@@ -206,6 +206,8 @@ namespace Gpu {
 	namespace Nvml { bool shutdown() { return false; } }
 	namespace Rsmi { bool shutdown() { return false; } }
 	namespace Asysfs { bool shutdown() { return false; } }
+	//? The asahi DRM driver is Linux-only (Asahi Linux)
+	namespace Asahi { bool shutdown() { return false; } }
 
 	//? Apple Silicon GPU data collection via IOReport
 	namespace AppleSilicon {

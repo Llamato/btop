@@ -34,9 +34,12 @@ tab-size = 4
 
 #include <arpa/inet.h> // for inet_ntop()
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
+#include <regex>
+#include <sys/ioctl.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
@@ -317,6 +320,19 @@ namespace Gpu {
 		uint32_t device_count = 0;
 		vector<device_paths> devices;
 	}
+
+	//? Asahi Linux (Apple AGX iGPU) data collection. The asahi DRM driver is a platform driver:
+	//? no PCI ID, no vendor library and no metrics sysfs nodes. GPU identity is read through the
+	//? Asahi DRM UAPI on the render node, dynamic stats only when the kernel additionally
+	//? implements DRM_IOCTL_ASAHI_GET_STATS (see docs/asahi_agx.md).
+	namespace Asahi {
+		bool initialized = false;
+		bool init();
+		bool shutdown();
+		template <bool is_init> bool collect(gpu_info* gpus_slice);
+		uint32_t device_count = 0;
+		vector<struct device_info> devices;
+	}
 }
 
 #endif // GPU_SUPPORT
@@ -399,6 +415,11 @@ namespace Shared {
 		if (shown_gpus.contains("amd")) {
 			Gpu::Rsmi::init();
 			Gpu::Asysfs::init(); //? self-skips when rocm-smi already enumerated devices
+		}
+
+		//? Asahi Linux driver for the Apple AGX iGPU (Apple silicon running Linux)
+		if (shown_gpus.contains("apple")) {
+			Gpu::Asahi::init();
 		}
 
 		if (shown_gpus.contains("intel")) {
@@ -1986,15 +2007,15 @@ namespace Gpu {
 			gpu_names.resize(gpus.size() + device_count);
 
 			if (gpu_device_name) {
-				gpu_names[Nvml::device_count + Rsmi::device_count + Asysfs::device_count] = string(gpu_device_name);
+				gpu_names[Nvml::device_count + Rsmi::device_count + Asysfs::device_count + Asahi::device_count] = string(gpu_device_name);
 			} else {
-				gpu_names[Nvml::device_count + Rsmi::device_count + Asysfs::device_count] = "Intel GPU";
+				gpu_names[Nvml::device_count + Rsmi::device_count + Asysfs::device_count + Asahi::device_count] = "Intel GPU";
 			}
 
 			free(gpu_device_name);
 
 			initialized = true;
-			Intel::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count);
+			Intel::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count + Asahi::device_count);
 
 			return true;
 		}
@@ -2243,6 +2264,347 @@ namespace Gpu {
 		template bool collect<1>(gpu_info*);
 	}
 
+	//? Asahi Linux (Apple AGX iGPU) collection.
+	//?
+	//? Detection and static properties work with the upstream asahi driver today: the DRM render
+	//? node answers DRM_IOCTL_ASAHI_GET_PARAMS with chip id, GPU generation/variant, cluster and
+	//? core counts and the max core clock, which is enough to identify and name the GPU.
+	//?
+	//? The driver reports no utilization/temperature/power in sysfs, so dynamic values are read
+	//? with DRM_IOCTL_ASAHI_GET_STATS, an extension that must be added to the kernel driver
+	//? (see docs/asahi_agx.md). Kernels without it simply leave those functions unsupported.
+	namespace Asahi {
+		//? Local mirror of the parts of <drm/asahi_drm.h> that are used, so btop needs neither
+		//? libdrm nor kernel headers. Layouts and sizes must match the kernel UAPI exactly.
+		constexpr unsigned int DRM_IOCTL_BASE_NR = 0x64; // 'd'
+		constexpr unsigned int DRM_COMMAND_BASE_NR = 0x40;
+
+		//? enum drm_asahi_ioctl_id members.
+		constexpr unsigned int ASAHI_ID_GET_PARAMS = 0;
+		//? DRM_ASAHI_GET_STATS is appended after DRM_ASAHI_SUBMIT (= 10) by the kernel extension,
+		//? on kernels without it the ioctl fails with EINVAL like any unknown Asahi ioctl.
+		constexpr unsigned int ASAHI_ID_GET_STATS = 11;
+
+		//? struct drm_asahi_get_stats::valid bits (DRM_ASAHI_STAT_*)
+		constexpr unsigned int STAT_BUSY = 1u << 0;
+		constexpr unsigned int STAT_PSTATE = 1u << 1;
+		constexpr unsigned int STAT_FREQ = 1u << 2;
+		constexpr unsigned int STAT_POWER = 1u << 3;
+		constexpr unsigned int STAT_TEMP = 1u << 4;
+
+		//? Leading members of struct drm_asahi_params_global; asking for only these bytes keeps
+		//? the call working with driver versions whose struct has fewer trailing fields.
+		struct params_head {
+			uint64_t features;
+			uint32_t gpu_generation;
+			uint32_t gpu_variant;
+			uint32_t gpu_revision;
+			uint32_t chip_id;
+			uint32_t num_dies;
+			uint32_t num_clusters_total;
+			uint32_t num_cores_per_cluster;
+			uint32_t max_frequency_khz;
+		};
+		static_assert(sizeof(params_head) == 40, "Asahi params_head layout mismatch");
+
+		struct get_params {
+			uint32_t param_group;
+			uint32_t pad;
+			uint64_t pointer;
+			uint64_t size;
+		};
+
+		//? struct drm_asahi_get_stats (kernel extension, see docs/asahi_agx.md)
+		struct gpu_stats {
+			uint64_t flags;
+			uint64_t timestamp_ns;
+			uint32_t valid;
+			uint32_t busy_percent;
+			uint64_t gpu_busy_ns;
+			uint64_t gpu_idle_ns;
+			uint32_t pstate;
+			uint32_t frequency_khz;
+			uint64_t power_uw;
+			int32_t temp_mcelsius;
+			uint32_t pad;
+		};
+		static_assert(sizeof(gpu_stats) == 64, "Asahi gpu_stats layout mismatch");
+
+		//? Keep the direction bits identical to the kernel definitions (DRM_IOW / DRM_IOWR),
+		//? DRM looks up ioctls by the exact command number.
+		constexpr unsigned int IOCTL_GET_PARAMS =
+			_IOW(DRM_IOCTL_BASE_NR, DRM_COMMAND_BASE_NR + ASAHI_ID_GET_PARAMS, struct get_params);
+		constexpr unsigned int IOCTL_GET_STATS =
+			_IOWR(DRM_IOCTL_BASE_NR, DRM_COMMAND_BASE_NR + ASAHI_ID_GET_STATS, struct gpu_stats);
+
+		struct device_info {
+			fs::path device;        //? /sys/class/drm/cardN/device, resolved
+			fs::path render_node;   //? /dev/dri/renderD128, empty if no render node was found
+			fs::path temp_input;    //? SMC hwmon input for a sensor labelled "GPU", empty if none
+			int fd = -1;
+			uint32_t chip_id = 0;
+			uint32_t generation = 0;
+			char variant = 0;
+			uint32_t clusters = 0;
+			uint32_t cores = 0;
+			unsigned int max_freq_mhz = 0;
+			uint32_t stats_valid = 0;
+			string name;
+		};
+
+		//? The Asahi UAPI reports the chip id in BCD (0x6001 for an Apple T6001), while
+		//? Cpu::apple_cpu_id_to_name() expects the decimal id used in the device tree (t6001).
+		static uint32_t bcd_to_decimal(uint32_t bcd) {
+			uint32_t dec = 0;
+			for (uint32_t scale = 1; scale <= 10000000; scale *= 10) {
+				dec += (bcd & 0xf) * scale;
+				bcd >>= 4;
+			}
+			return dec;
+		}
+
+		//? Read a sysfs node containing a single integer, <fallback> on any error.
+		static long long read_ll(const fs::path& path, long long fallback = 0) {
+			try {
+				return std::stoll(readfile(path, std::to_string(fallback)));
+			} catch (const std::exception&) {
+				return fallback;
+			}
+		}
+
+		//? Match cardN nodes only, skipping cardN-<connector>, renderD* and event nodes.
+		static bool is_card_node(const string& fname) {
+			if (not fname.starts_with("card") or fname.size() <= 4) return false;
+			return std::all_of(fname.begin() + 4, fname.end(), [](char c) { return c >= '0' and c <= '9'; });
+		}
+
+		//? The drm directory holding cardN also holds the matching renderD* node.
+		static fs::path find_render_node(const fs::path& card_node) {
+			std::error_code ec;
+			const auto card_dir = fs::canonical(card_node, ec);
+			if (ec) return {};
+			const auto drm_dir = card_dir.parent_path();
+			if (not fs::is_directory(drm_dir, ec)) return {};
+			for (const auto& entry : fs::directory_iterator(drm_dir, ec)) {
+				if (entry.path().filename().string().starts_with("renderD"))
+					return fs::path("/dev/dri") / entry.path().filename();
+			}
+			return {};
+		}
+
+		//? Fallback identity when the render node can't be opened: the OF node of the platform
+		//? device holds an "apple,agx-t6001" style compatible string.
+		static uint32_t chip_id_from_of_node(const fs::path& device) {
+			std::error_code ec;
+			const auto of_node = fs::canonical(device / "of_node", ec);
+			if (ec) return 0;
+			const string compatible = readfile(of_node / "compatible", "");
+			static const std::regex agx_compatible(R"(apple,agx-t([0-9]{4}))");
+			std::smatch match;
+			if (not std::regex_search(compatible, match, agx_compatible)) return 0;
+			try {
+				return (uint32_t)std::stoul(match[1].str());
+			} catch (const std::exception&) {
+				return 0;
+			}
+		}
+
+		//? Temperatures on Apple silicon come from the SMC (macsmc_hwmon) which only exposes the
+		//? sensors listed in the device tree, so a GPU sensor may or may not be present.
+		static fs::path find_smc_gpu_temp() {
+			std::error_code ec;
+			const fs::path hwmon_root("/sys/class/hwmon");
+			if (not fs::is_directory(hwmon_root, ec)) return {};
+			for (const auto& hwmon : fs::directory_iterator(hwmon_root, ec)) {
+				for (const auto& entry : fs::directory_iterator(hwmon.path(), ec)) {
+					const auto fname = entry.path().filename().string();
+					if (not fname.starts_with("temp") or not fname.ends_with("_label")) continue;
+					const auto label = str_to_upper(string(trim(readfile(entry.path(), ""))));
+					if (not label.contains("GPU")) continue;
+					auto input = hwmon.path() / (fname.substr(0, fname.size() - 6) + "_input");
+					if (fs::exists(input, ec)) return input;
+				}
+			}
+			return {};
+		}
+
+		bool init() {
+			if (initialized) return false;
+			std::error_code ec;
+			const fs::path drm_root("/sys/class/drm");
+			if (not fs::is_directory(drm_root, ec)) {
+				Logger::debug("asahi: /sys/class/drm is missing, no Apple AGX GPU detected");
+				return false;
+			}
+
+			for (const auto& entry : fs::directory_iterator(drm_root, ec)) {
+				if (not is_card_node(entry.path().filename().string())) continue;
+
+				const auto device_link = entry.path() / "device";
+				//? asahi binds to a platform device, so the driver symlink is the only way to
+				//? identify it; there are no vendor/device PCI id nodes to probe.
+				const auto driver = fs::read_symlink(device_link / "driver", ec);
+				if (ec or driver.filename().string() != "asahi") continue;
+
+				device_info d {};
+				d.device = fs::canonical(device_link, ec);
+				if (ec) continue;
+				d.render_node = find_render_node(entry.path());
+
+				if (d.render_node.empty()) {
+					Logger::debug("asahi: no render node for {}", entry.path());
+				} else {
+					d.fd = open(d.render_node.c_str(), O_RDWR | O_CLOEXEC);
+					if (d.fd < 0) d.fd = open(d.render_node.c_str(), O_RDONLY | O_CLOEXEC);
+					if (d.fd < 0) {
+						Logger::debug("asahi: could not open {} ({})", d.render_node, strerror(errno));
+					} else {
+						params_head p {};
+						get_params req {
+							.param_group = 0,
+							.pad = 0,
+							.pointer = (uint64_t)(uintptr_t)&p,
+							.size = sizeof(p),
+						};
+						if (ioctl(d.fd, IOCTL_GET_PARAMS, &req) == 0) {
+							d.chip_id = bcd_to_decimal(p.chip_id);
+							d.generation = p.gpu_generation;
+							d.variant = (char)p.gpu_variant;
+							d.clusters = p.num_clusters_total;
+							d.cores = p.num_clusters_total * p.num_cores_per_cluster;
+							d.max_freq_mhz = (unsigned int)(p.max_frequency_khz / 1000);
+
+							gpu_stats s {};
+							if (ioctl(d.fd, IOCTL_GET_STATS, &s) == 0) {
+								d.stats_valid = s.valid;
+							} else {
+								Logger::debug("asahi: {} does not support GET_STATS ({}), showing static info only",
+									d.render_node, strerror(errno));
+							}
+						} else {
+							Logger::debug("asahi: GET_PARAMS failed on {} ({})", d.render_node, strerror(errno));
+						}
+					}
+				}
+
+				if (d.chip_id == 0) d.chip_id = chip_id_from_of_node(d.device);
+				d.temp_input = find_smc_gpu_temp();
+
+				const string soc = Cpu::apple_cpu_id_to_name(d.chip_id);
+				const string agx = d.variant != 0
+					? fmt::format("AGX G{}{}", d.generation, d.variant)
+					: (d.generation != 0 ? fmt::format("AGX G{}", d.generation) : "AGX");
+				d.name = (soc.empty() ? "Apple " : soc + " ") + "GPU (" + agx + ")";
+
+				//? Skip GPUs with no readable dynamic metrics. Without the GET_STATS extension (and
+				//? without an SMC GPU temperature sensor) btop would render a box with nothing in it.
+				if ((d.stats_valid & (STAT_BUSY | STAT_FREQ | STAT_POWER | STAT_TEMP)) == 0 and d.temp_input.empty()) {
+					Logger::info("asahi: found {} but the asahi driver exposes no usage, clock or temperature "
+						"data yet, dynamic stats need the DRM_ASAHI_GET_STATS kernel extension (see docs/asahi_agx.md)",
+						d.name);
+					continue;
+				}
+
+				if (d.max_freq_mhz > 0)
+					Logger::info("asahi: {} ({} cores, {} clusters, max {} MHz)", d.name, d.cores, d.clusters, d.max_freq_mhz);
+				else
+					Logger::info("asahi: {}", d.name);
+
+				devices.push_back(std::move(d));
+			}
+
+			device_count = (uint32_t)devices.size();
+			if (device_count == 0) {
+				Logger::debug("asahi: no GPU using the asahi driver found");
+				return false;
+			}
+
+			gpus.resize(gpus.size() + device_count);
+			gpu_names.resize(gpus.size());
+			for (uint32_t i = 0; i < device_count; ++i)
+				gpu_names[Nvml::device_count + Rsmi::device_count + Asysfs::device_count + i] = devices[i].name;
+
+			initialized = true;
+			Asahi::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count);
+			return true;
+		}
+
+		bool shutdown() {
+			if (not initialized) return false;
+			for (auto& d : devices) {
+				if (d.fd >= 0) close(d.fd);
+				d.fd = -1;
+			}
+			devices.clear();
+			device_count = 0;
+			initialized = false;
+			return true;
+		}
+
+		template <bool is_init> bool collect(gpu_info* gpus_slice) {
+			if (not initialized) return false;
+
+			for (uint32_t i = 0; i < device_count; ++i) {
+				gpu_info& gpu = gpus_slice[i];
+				const device_info& d = devices[i];
+
+				if constexpr (is_init) {
+					gpu.supported_functions = {
+						.gpu_utilization = (d.stats_valid & STAT_BUSY) != 0,
+						//? AGX shares system memory with the CPU and has no separate memory-busy counter
+						.mem_utilization = false,
+						.gpu_clock = (d.stats_valid & STAT_FREQ) != 0,
+						.mem_clock = false,
+						.pwr_usage = (d.stats_valid & STAT_POWER) != 0,
+						//? The firmware performance state, drawn as "P-state: P<n>" like on nvidia
+						.pwr_state = (d.stats_valid & STAT_PSTATE) != 0,
+						.temp_info = ((d.stats_valid & STAT_TEMP) != 0 or not d.temp_input.empty()),
+						.mem_total = false,
+						.mem_used = false,
+						.pcie_txrx = false,
+						.encoder_utilization = false,
+						.decoder_utilization = false,
+					};
+					gpu.pwr_max_usage = 0;
+					gpu.mem_total = 0;
+					gpu.mem_used = 0;
+				}
+
+				gpu_stats s {};
+				const bool stats = d.fd >= 0 and ioctl(d.fd, IOCTL_GET_STATS, &s) == 0;
+
+				if (stats and (s.valid & STAT_BUSY) != 0)
+					gpu.gpu_percent.at("gpu-totals").push_back(clamp((long long)s.busy_percent, 0LL, 100LL));
+
+				if (stats and (s.valid & STAT_FREQ) != 0)
+					gpu.gpu_clock_speed = (unsigned int)(s.frequency_khz / 1000);
+
+				if (stats and (s.valid & STAT_PSTATE) != 0)
+					gpu.pwr_state = clamp((long long)s.pstate, 0LL, 100LL);
+
+				//? Prefer the SMC sensor when the machine exposes one, it is a real temperature.
+				if (not d.temp_input.empty())
+					gpu.temp.push_back(clamp(read_ll(d.temp_input) / 1000, -50LL, 1000LL));
+				else if (stats and (s.valid & STAT_TEMP) != 0)
+					gpu.temp.push_back(clamp((long long)s.temp_mcelsius / 1000, -50LL, 1000LL));
+
+				if (stats and (s.valid & STAT_POWER) != 0) {
+					gpu.pwr_usage = (long long)s.power_uw / 1000; //? microwatts -> milliwatts
+					gpu.pwr_max_usage = max(gpu.pwr_max_usage, gpu.pwr_usage);
+					if (gpu.pwr_max_usage > 0)
+						gpu.gpu_percent.at("gpu-pwr-totals").push_back(clamp(
+							(long long)round((double)gpu.pwr_usage * 100.0 / (double)gpu.pwr_max_usage), 0LL, 100LL));
+					}
+				}
+
+			return true;
+		}
+
+		//? Explicit template instantiations referenced from Shared::init and Gpu::collect.
+		template bool collect<0>(gpu_info*);
+		template bool collect<1>(gpu_info*);
+	}
+
 	//? Collect data from GPU-specific libraries
 	auto collect(bool no_update) -> vector<gpu_info>& {
 		if (Runner::stopping or (no_update and not gpus.empty())) return gpus;
@@ -2253,7 +2615,8 @@ namespace Gpu {
 		Nvml::collect<0>(gpus.data()); // raw pointer to vector data, size == Nvml::device_count
 		Rsmi::collect<0>(gpus.data() + Nvml::device_count); // size = Rsmi::device_count
 		Asysfs::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count); // size = Asysfs::device_count
-		Intel::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count); // size = Intel::device_count
+		Asahi::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count); // size = Asahi::device_count
+		Intel::collect<0>(gpus.data() + Nvml::device_count + Rsmi::device_count + Asysfs::device_count + Asahi::device_count); // size = Intel::device_count
 
 		//* Calculate average usage
 		long long avg = 0;
