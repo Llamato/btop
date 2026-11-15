@@ -2,7 +2,10 @@
   description = "btop with the Asahi AGX GPU collector (DRM_IOCTL_ASAHI_GET_STATS)";
 
   inputs = {
-    nixpkgs.url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst";
+    nixpkgs = {
+      url = "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst";
+      flake = false;
+    };
   };
 
   outputs = inputs: {
